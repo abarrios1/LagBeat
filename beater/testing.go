@@ -2,7 +2,6 @@ package beater
 
 import (
 	//"crypto/tls"
-	"strings"
 	"fmt"
 	"time"
 	"os"
@@ -15,10 +14,6 @@ import (
 	"github.com/Shopify/sarama"
 )
 
-var (
-	invalidClientIDCharactersRegExp = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
-)
-
 // Testing configuration.
 type Testing struct {
 	config config.Config
@@ -29,9 +24,22 @@ type Testing struct {
 	brokers []string
 	zookeepers []string
 	filterGroups *regexp.Regexp
+	filterTopics *regexp.Regexp
 	version sarama.KafkaVersion
 	sClient sarama.Client
 	client beat.Client
+}
+
+type group struct {
+	Name    string        `json:"name"`
+	Topic   string        `json:"topic,omitempty"`
+	Offsets []groupOffset `json:"offsets,omitempty"`
+}
+
+type groupOffset struct {
+	Partition int32  `json:"partition"`
+	Offset    *int64 `json:"offset"`
+	Lag       *int64 `json:"lag"`
 }
 
 // New creates an instance of testing.
@@ -58,7 +66,7 @@ func (bt *Testing) Run(b *beat.Beat) error {
 
 	var err error
 	if bt.sClient, err = sarama.NewClient(bt.config.Zookeepers, sarama.NewConfig()); err != nil {
-		fmt.Println("failed to create client err=%v", err)
+		failf("failed to create client err=%v", err)
 	} else {
 		fmt.Println("Succesfully Connected to broker")
 	}
@@ -76,6 +84,17 @@ func (bt *Testing) Run(b *beat.Beat) error {
 		}
 	}
 	fmt.Fprintf(os.Stderr, "found %v groups\n", len(groups))
+
+	topics := []string{bt.config.Topic}
+	if bt.config.Topic == "" {
+		topics = []string{}
+		for _, t := range bt.fetchTopics() {
+			if bt.filterTopics.MatchString(t) {
+				topics = append(topics, t)
+			}
+		}
+	}
+	fmt.Fprintf(os.Stderr, "found %v topics\n", len(topics))
 
 	bt.client, err = b.Publisher.Connect()
 	if err != nil {
@@ -143,6 +162,14 @@ awaitGroups:
 	}
 }
 
+func (bt *Testing) fetchTopics() []string {
+	tps, err := bt.sClient.Topics()
+	if err != nil {
+		failf("failed to read topics err=%v", err)
+	}
+	return tps
+}
+
 func (bt *Testing) findGroupsOnBroker(broker *sarama.Broker, results chan findGroupResult, errs chan error) {
 	var (
 		err  error
@@ -201,44 +228,6 @@ func (bt *Testing) saramaConfig() *sarama.Config {
 	cfg.ClientID = "kt-group-" + sanitizeUsername(usr.Username)
 
 	return cfg
-}
-
-func kafkaVersion(s string) sarama.KafkaVersion {
-	dflt := sarama.V0_10_0_0
-	switch s {
-	case "v0.8.2.0":
-		return sarama.V0_8_2_0
-	case "v0.8.2.1":
-		return sarama.V0_8_2_1
-	case "v0.8.2.2":
-		return sarama.V0_8_2_2
-	case "v0.9.0.0":
-		return sarama.V0_9_0_0
-	case "v0.9.0.1":
-		return sarama.V0_9_0_1
-	case "v0.10.0.0":
-		return sarama.V0_10_0_0
-	case "v0.10.0.1":
-		return sarama.V0_10_0_1
-	case "v0.10.1.0":
-		return sarama.V0_10_1_0
-	case "v0.10.2.0":
-		return sarama.V0_10_2_0
-	case "":
-		return dflt
-	}
-
-	fmt.Printf("unsupported kafka version %#v - supported: v0.8.2.0, v0.8.2.1, v0.8.2.2, v0.9.0.0, v0.9.0.1, v0.10.0.0, v0.10.0.1, v0.10.1.0, v0.10.2.0", s)
-	return dflt
-}
-
-func sanitizeUsername(u string) string {
-	// Windows user may have format "DOMAIN|MACHINE\username", remove domain/machine if present
-	s := strings.Split(u, "\\")
-	u = s[len(s)-1]
-	// Windows account can contain spaces or other special characters not supported
-	// in client ID. Keep the bare minimum and ditch the rest.
-	return invalidClientIDCharactersRegExp.ReplaceAllString(u, "")
 }
 
 // Stop stops testing.
