@@ -55,10 +55,10 @@ func (bt *Testing) Run(b *beat.Beat) error {
 	} else {
 		fmt.Println("Succesfully Connected to broker")
 	}
-
+	//topic := bt.sClient.Topics()
 	brokers := bt.sClient.Brokers()
 	fmt.Fprintf(os.Stderr, "found %v brokers\n", len(brokers))
-
+	fmt.Println(bt.group)
 	groups := []string{bt.group}
 	if bt.group == "" {
 		groups = []string{}
