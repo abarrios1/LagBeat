@@ -58,9 +58,9 @@ func (bt *Testing) Run(b *beat.Beat) error {
 	//topic := bt.sClient.Topics()
 	brokers := bt.sClient.Brokers()
 	fmt.Fprintf(os.Stderr, "found %v brokers\n", len(brokers))
-	fmt.Println(bt.group)
-	groups := []string{bt.group}
-	if bt.group == "" {
+	fmt.Println(bt.config.Group)
+	groups := []string{bt.config.Group}
+	if bt.group.Group == "" {
 		groups = []string{}
 		for _, g := range bt.findGroups(brokers) {
 			if bt.filterGroups.MatchString(g) {
