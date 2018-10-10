@@ -3,6 +3,7 @@ package beater
 import (
 	"fmt"
 	"github.com/Shopify/sarama"
+	"io"
 	"os"
 	"regexp"
 	"strings"
@@ -11,6 +12,12 @@ import (
 var (
 	invalidClientIDCharactersRegExp = regexp.MustCompile(`[^a-zA-Z0-9_-]`)
 )
+
+func logClose(name string, c io.Closer) {
+	if err := c.Close(); err != nil {
+		fmt.Fprintf(os.Stderr, "failed to close %#v err=%v", name, err)
+	}
+}
 
 type printContext struct {
 	output interface{}
