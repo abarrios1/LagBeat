@@ -9,8 +9,8 @@ import (
 
 type Config struct {
 	Period time.Duration `config:"period"`
-	Group string         `config:group`
-	Topic string	     `config:"topic"`
+	Group []string       `config:group`
+	Topic []string	     `config:"topic"`
 	Brokers []string     `config:"brokers"`
 	Zookeepers []string  `config:"zookeepers"` 
 }
@@ -19,8 +19,8 @@ type Config struct {
 
 var DefaultConfig = Config{
 	Period: 1 * time.Second,
-	Group: "",
-	Topic: "",
+	Group: []string{""},
+	Topic: []string{""},
 	Brokers: []string{""},
 	Zookeepers: []string{""},
 }
