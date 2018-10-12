@@ -3,12 +3,24 @@
 
 package config
 
-import "time"
+import (
+	"time"
+)
 
 type Config struct {
 	Period time.Duration `config:"period"`
+	Group string         `config:group`
+	Topic string	     `config:"topic"`
+	Brokers []string     `config:"brokers"`
+	Zookeepers []string  `config:"zookeepers"` 
 }
+
+
 
 var DefaultConfig = Config{
 	Period: 1 * time.Second,
+	Group: "",
+	Topic: "",
+	Brokers: []string{""},
+	Zookeepers: []string{""},
 }
