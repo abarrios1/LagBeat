@@ -12,14 +12,17 @@ import (
 	"github.com/elastic/beats/libbeat/beat"
 	"github.com/elastic/beats/libbeat/common"
 	"github.com/elastic/beats/libbeat/logp"
-	"github.com/abarrios1/testing/config"
+	"github.com/abarrios1/Kafkabeat/config"
 	"github.com/wvanbergen/kazoo-go"
 	"github.com/Shopify/sarama"
 )
-var zClient *kazoo.Kazoo
+var (
+	sClient sarama.Client
+	zClient *kazoo.Kazoo
+)
 
 // Testing configuration.
-type Testing struct {
+type Kafkabeat struct {
 	config config.Config
 	done   chan struct{}
 	period time.Duration
@@ -35,7 +38,6 @@ type Testing struct {
 	filterTopics regexp.Regexp
 	version sarama.KafkaVersion
 	offsets      bool
-	sClient sarama.Client
 	client beat.Client
 }
 
@@ -51,46 +53,50 @@ type groupOffset struct {
 	Lag       *int64 `json:"lag"`
 }
 
-// New creates an instance of testing.
+type findGroupResult struct {
+	done bool
+	group string
+}
+
+// New creates an instance of Kafkabeat.
 func  New(b *beat.Beat, cfg *common.Config) (beat.Beater, error)  {
 	c := config.DefaultConfig
 	if err := cfg.Unpack(&c); err != nil {
 		return nil, fmt.Errorf("Error reading config file: %v", err)
 	}
 
-	bt := &Testing{
+	bt := &Kafkabeat{
 		done:   make(chan struct{}),
 		config: c,
 	}
 	return bt, nil
 }
 
-// Run starts testing.
-func (bt *Testing) Run(b *beat.Beat) error {
-	logp.Info("testing is running! Hit CTRL-C to stop it.")
+func (bt *Kafkabeat) Config(b *beat.Beat) error {
+	logp.Info("Configuring Kafkabeat...")
 
+	// Initialize variable err
 	var err error
-	// Create a new sarama client to connect to brokers and zookeepers
-	if bt.sClient, err = sarama.NewClient([]string{"10.44.64.136:9092"}, bt.saramaConfig()); err != nil {
-		failf("failed to create client err=%v", err)
-	} else {
-		fmt.Println("Succesfully Connected to broker")
-	}
-	
+
 	// Assign zookeepers to zookeepers in struct
 	bt.zookeepers = bt.config.Zookeepers
 	if bt.zookeepers == nil || len(bt.zookeepers) == 0 {
 		fmt.Println("One zookeeper must be defined")
 	}
 
+	// Create a new sarama client to connect to brokers and zookeepers
+	if sClient, err = sarama.NewClient([]string{"10.44.64.136:9092"}, bt.saramaConfig()); err != nil {
+		failf("failed to create client err=%v", err)
+	} else {
+		logp.Info("Succesfully Connected to broker: %v")
+	}
+
 	// Connect to kazoo client
 	zClient, err = kazoo.NewKazoo(bt.config.Brokers, nil)
 	if err != nil {
-		fmt.Println("Error identifying brokers from zookeeper")
-		return err
+		fmt.Errorf("Error identifying brokers from zookeeper: %v", err)
 	}
-	
-	brokers := bt.sClient.Brokers()
+
 	// Get a list of all brokers from kazoo
 	bt.brokers, err = zClient.BrokerList()
 	if (bt.brokers == nil || len(bt.brokers) == 0) {
@@ -98,62 +104,28 @@ func (bt *Testing) Run(b *beat.Beat) error {
 	}
 	logp.Info("Brokers: %v",bt.brokers)
 
-	fmt.Println("\nChecking out the groups:\n")
-	// Get consumer groups using kazoo
-	groups := []string{bt.group}
-	//fmt.Println(len(groups))
-	if bt.group == "" {
-		groups = []string{}
-		for _, g := range bt.findGroups(brokers) {
-			//if bt.filterGroups.MatchString(g) {
-			groups = append(groups, g)
-			//}
-		}
-	}
-	fmt.Fprintf(os.Stderr, "found %v groups\n", len(groups))
-	fmt.Println(groups)	
-	topics := []string{bt.topic}
-	if bt.topic == "" {
-		topics = []string{}
-		for _, t := range bt.fetchTopics() {
-			//if bt.filterTopics.MatchString(t) {
-			topics = append(topics, t)
-			//	fmt.Println("In for loop topics")
-			//}
-			//fmt.Println(t)
-		}
-	}
-	fmt.Fprintf(os.Stderr, "found %v topics\n", len(topics))
-
 	out := make(chan printContext)
 	go print(out, bt.pretty)
 
-	fmt.Println(bt.offsets)
+	// Get Consumer Groups
+	groups := bt.getConsumerGroups()
 
-	fmt.Println(!bt.offsets)
+	for i, grp := range groups {
+		fmt.Println(grp)
+		ctx := printContext{output: group{Name: grp}, done: make(chan struct{})}
+		out <- ctx
+		<-ctx.done
 
-		for i, grp := range groups {
-			fmt.Println(grp)
-			ctx := printContext{output: group{Name: grp}, done: make(chan struct{})}
-			out <- ctx
-			<-ctx.done
-
-			if bt.verbose {
-				fmt.Fprintf(os.Stderr, "%v/%v\n", i+1, len(groups))
-			}
+		if bt.verbose {
+			fmt.Fprintf(os.Stderr, "%v/%v\n", i+1, len(groups))
 		}
-	
-	topicPartitions := map[string][]int32{}
-	
-	for _, topic := range topics {
-		parts := bt.partitions
-		fmt.Println(len(parts))
-		if len(parts) == 0 {
-			parts = bt.fetchPartitions(topic)
-			fmt.Fprintf(os.Stderr, "found partitions=%v for topic=%v\n", parts, topic)
-		}
-		topicPartitions[topic] = parts
 	}
+
+	// Get Topics
+	topics := bt.getTopics()
+
+	//Get Topic Partitions
+	topicPartitions := bt.getTopicPartitions(topics)
 
 	wg := &sync.WaitGroup{}
 	wg.Add(len(groups) * len(topics))
@@ -162,16 +134,37 @@ func (bt *Testing) Run(b *beat.Beat) error {
 			go func(grp, topic string, partitions []int32) {
 				bt.printGroupTopicOffset(out, grp, topic, partitions)
 				wg.Done()
-			}(grp, top, parts)
+			}(grp, string(top), []int32(parts))
 		}
 	}
+
 	wg.Wait()
 
+	return err
+}
+
+// Run starts Kafkabeat.
+func (bt *Kafkabeat) Run(b *beat.Beat) error {
+	logp.Info("Kafkabeat is running! Hit CTRL-C to stop it.")
+	//Initialize error variable
+	var err error
+
+	// Get Consumer Groups
+	groups := bt.getConsumerGroups()
+
+	// Get Topics
+	topics := bt.getTopics()
+
+	//Get Topic Partitions
+	topicPartitions := bt.getTopicPartitions(topics)
+
+	// Connect to beats client to publish events
 	bt.client, err = b.Publisher.Connect()
 	if err != nil {
 		return err
 	}
 
+	// Initialize ticker with time set in config file
 	ticker := time.NewTicker(bt.config.Period)
 	counter := 1
 	for {
@@ -186,19 +179,72 @@ func (bt *Testing) Run(b *beat.Beat) error {
 			Fields: common.MapStr{
 				"type":    b.Info.Name,
 				"counter": counter,
-				"group": bt.config.Group,
-				"topic": bt.config.Topic,
-				"brokers": bt.config.Zookeepers,
+				"#groups":   len(groups),
+				"#topics":   len(topics),
+				"#topicPartitions": len(topicPartitions),
+
 			},
 		}
 		bt.client.Publish(event)
 		logp.Info("Event sent")
 		counter++
 	}
+}
+func (bt *Kafkabeat) getConsumerGroups() []string {
+	//List all brokers...
+	brokers := sClient.Brokers()
 
+	// Initialize groups
+	groups := []string{}
+
+	// If group struct is empty then get all groups
+	if bt.group == "" {
+		// Find Groups must be passing a *sarama.Broker through, not string
+		for _, g := range bt.findGroups(brokers) {
+			groups = append(groups, g)
+		}
+	}
+	// Print the length of the groups
+	fmt.Fprintf(os.Stderr, "found %v groups\n", len(groups))
+
+	return groups
 }
 
-func (bt *Testing) printGroupTopicOffset(out chan printContext, grp, top string, parts []int32) {
+func (bt *Kafkabeat) getTopics() []string {
+	//Initalize topics
+	topics := []string{}
+
+	// If topic struct is empty then get all topics
+	if bt.topic == "" {
+		// Calls function fetchTopics() for all topics
+		for _, t := range bt.fetchTopics() {
+			topics = append(topics, t)
+		}
+	}
+	// Print the length of the topics
+	fmt.Fprintf(os.Stderr, "found %v topics\n", len(topics))
+
+	return nil
+}
+
+func (bt *Kafkabeat) getTopicPartitions(topics []string) []string {
+
+	topicPartitions := map[string][]int32{}
+	parts := bt.partitions
+	for _, topic := range topics {
+		fmt.Println(len(parts))
+		if len(parts) == 0 {
+			parts = bt.fetchPartitions(topic)
+			//fmt.Fprintf(os.Stderr, "found partitions=%v for topic=%v\n", parts, topic)
+		}
+		topicPartitions[topic] = parts
+	}
+
+	return nil
+}
+
+
+func (bt *Kafkabeat) printGroupTopicOffset(out chan printContext, grp, top string, parts []int32) {
 	target := group{Name: grp, Topic: top, Offsets: []groupOffset{}}
 	results := make(chan groupOffset)
 	done := make(chan struct{})
@@ -230,8 +276,8 @@ awaitGroupOffsets:
 	}
 }
 
-func (bt *Testing) resolveOffset(top string, part int32, off int64) int64 {
-	resolvedOff, err := bt.sClient.GetOffset(top, part, off)
+func (bt *Kafkabeat) resolveOffset(top string, part int32, off int64) int64 {
+	resolvedOff, err := sClient.GetOffset(top, part, off)
 	if err != nil {
 		failf("failed to get offset to reset to for partition=%d err=%v", part, err)
 	}
@@ -243,7 +289,7 @@ func (bt *Testing) resolveOffset(top string, part int32, off int64) int64 {
 	return resolvedOff
 }
 
-func (bt *Testing) fetchGroupOffset(wg *sync.WaitGroup, grp, top string, part int32, results chan groupOffset) {
+func (bt *Kafkabeat) fetchGroupOffset(wg *sync.WaitGroup, grp, top string, part int32, results chan groupOffset) {
 	var (
 		err           error
 		offsetManager sarama.OffsetManager
@@ -256,7 +302,7 @@ func (bt *Testing) fetchGroupOffset(wg *sync.WaitGroup, grp, top string, part in
 
 	defer wg.Done()
 
-	if offsetManager, err = sarama.NewOffsetManagerFromClient(grp, bt.sClient); err != nil {
+	if offsetManager, err = sarama.NewOffsetManagerFromClient(grp, sClient); err != nil {
 		failf("failed to create client err=%v", err)
 	}
 	defer logClose("offset manager", offsetManager)
@@ -287,13 +333,8 @@ func (bt *Testing) fetchGroupOffset(wg *sync.WaitGroup, grp, top string, part in
 	lag := partOff - groupOff
 	results <- groupOffset{Partition: part, Offset: &groupOff, Lag: &lag}
 }
-	
-type findGroupResult struct {
-	done bool
-	group string
-}
 
-func (bt *Testing) findGroups(brokers []*sarama.Broker) []string {
+func (bt *Kafkabeat) findGroups(brokers []*sarama.Broker) []string {
 	var (
 		doneCount int
 		groups    = []string{}
@@ -325,8 +366,8 @@ awaitGroups:
 	return groups
 }
 
-func (bt *Testing) fetchTopics() []string {
-	tps, err := bt.sClient.Topics()
+func (bt *Kafkabeat) fetchTopics() []string {
+	tps, err := sClient.Topics()
 	if err != nil {
 		failf("failed to read topics err=%v", err)
 	}
@@ -334,7 +375,7 @@ func (bt *Testing) fetchTopics() []string {
 	return tps
 }
 
-func (bt *Testing) findGroupsOnBroker(broker *sarama.Broker, results chan findGroupResult, errs chan error) {
+func (bt *Kafkabeat) findGroupsOnBroker(broker *sarama.Broker, results chan findGroupResult, errs chan error) {
 	var (
 		err  error
 		resp *sarama.ListGroupsResponse
@@ -359,15 +400,15 @@ func (bt *Testing) findGroupsOnBroker(broker *sarama.Broker, results chan findGr
 	
 }
 
-func (bt *Testing) fetchPartitions(top string) []int32 {
-	ps, err := bt.sClient.Partitions(top)
+func (bt *Kafkabeat) fetchPartitions(top string) []int32 {
+	ps, err := sClient.Partitions(top)
 	if err != nil {
 		failf("failed to read partitions for topic=%s err=%v", top, err)
 	}
 	return ps
 }
 
-func (bt *Testing) connect(broker *sarama.Broker) error {
+func (bt *Kafkabeat) connect(broker *sarama.Broker) error {
 	if ok, _ := broker.Connected(); ok {
 		return nil
 	}
@@ -388,7 +429,7 @@ func (bt *Testing) connect(broker *sarama.Broker) error {
 	return nil
 }
 
-func (bt *Testing) saramaConfig() *sarama.Config {
+func (bt *Kafkabeat) saramaConfig() *sarama.Config {
 	var (
 		err error
 		usr *user.User
@@ -405,8 +446,8 @@ func (bt *Testing) saramaConfig() *sarama.Config {
 	return cfg
 }
 
-// Stop stops testing.
-func (bt *Testing) Stop() {
+// Stop stops Kafkabeat.
+func (bt *Kafkabeat) Stop() {
 	bt.client.Close()
 	close(bt.done)
 }
