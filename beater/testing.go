@@ -23,8 +23,8 @@ type Testing struct {
 	config config.Config
 	done   chan struct{}
 	period time.Duration
-	group  []string
-	topic  []string
+	group  string
+	topic  string
 	brokers []string
 	zookeepers []string
 	partitions   []int32
@@ -32,7 +32,7 @@ type Testing struct {
 	verbose      bool
 	pretty       bool
 	filterGroups *regexp.Regexp
-	filterTopics *regexp.Regexp
+	filterTopics regexp.Regexp
 	version sarama.KafkaVersion
 	offsets      bool
 	sClient sarama.Client
@@ -70,14 +70,13 @@ func (bt *Testing) Run(b *beat.Beat) error {
 	logp.Info("testing is running! Hit CTRL-C to stop it.")
 
 	var err error
-
 	// Create a new sarama client to connect to brokers and zookeepers
-	if bt.sClient, err = sarama.NewClient(bt.config.Zookeepers, sarama.NewConfig()); err != nil {
+	if bt.sClient, err = sarama.NewClient([]string{"10.44.64.136:9092"}, bt.saramaConfig()); err != nil {
 		failf("failed to create client err=%v", err)
 	} else {
 		fmt.Println("Succesfully Connected to broker")
 	}
-
+	
 	// Assign zookeepers to zookeepers in struct
 	bt.zookeepers = bt.config.Zookeepers
 	if bt.zookeepers == nil || len(bt.zookeepers) == 0 {
@@ -92,36 +91,83 @@ func (bt *Testing) Run(b *beat.Beat) error {
 	}
 	
 	brokers := bt.sClient.Brokers()
-
 	// Get a list of all brokers from kazoo
 	bt.brokers, err = zClient.BrokerList()
 	if (bt.brokers == nil || len(bt.brokers) == 0) {
 		fmt.Println("Unable to identify active brokers")
 	}
 	logp.Info("Brokers: %v",bt.brokers)
-	fmt.Println(bt.brokers)
 
-	// Assign topics to topic from sarama
-	bt.topic, err = bt.sClient.Topics()  
-	if err != nil {
-		return err
-	}
-	fmt.Printf("Monitoring topics: %v",bt.topic)
-	//group := sarama.Broker{}	
-	
 	fmt.Println("\nChecking out the groups:\n")
 	// Get consumer groups using kazoo
-	groups := bt.config.Group
-	if (groups == nil || len(groups) == 0) {
+	groups := []string{bt.group}
+	//fmt.Println(len(groups))
+	if bt.group == "" {
 		groups = []string{}
 		for _, g := range bt.findGroups(brokers) {
-			if bt.filterGroups.MatchString(g) {
-				groups = append(groups, g)
-			}
+			//if bt.filterGroups.MatchString(g) {
+			groups = append(groups, g)
+			//}
 		}
 	}
 	fmt.Fprintf(os.Stderr, "found %v groups\n", len(groups))
-		
+	fmt.Println(groups)	
+	topics := []string{bt.topic}
+	if bt.topic == "" {
+		topics = []string{}
+		for _, t := range bt.fetchTopics() {
+			//if bt.filterTopics.MatchString(t) {
+			topics = append(topics, t)
+			//	fmt.Println("In for loop topics")
+			//}
+			//fmt.Println(t)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "found %v topics\n", len(topics))
+
+	out := make(chan printContext)
+	go print(out, bt.pretty)
+
+	fmt.Println(bt.offsets)
+
+	fmt.Println(!bt.offsets)
+
+		for i, grp := range groups {
+			fmt.Println(grp)
+			ctx := printContext{output: group{Name: grp}, done: make(chan struct{})}
+			out <- ctx
+			<-ctx.done
+
+			if bt.verbose {
+				fmt.Fprintf(os.Stderr, "%v/%v\n", i+1, len(groups))
+			}
+		}
+	
+	topicPartitions := map[string][]int32{}
+	
+	for _, topic := range topics {
+		parts := bt.partitions
+		fmt.Println(len(parts))
+		if len(parts) == 0 {
+			parts = bt.fetchPartitions(topic)
+			fmt.Println(parts)
+			fmt.Fprintf(os.Stderr, "found partitions=%v for topic=%v\n", parts, topic)
+		}
+		topicPartitions[topic] = parts
+	}
+
+/*	wg := &sync.WaitGroup{}
+	wg.Add(len(groups) * len(topics))
+	for _, grp := range groups {
+		for top, parts := range topicPartitions {
+			go func(grp, topic string, partitions []int32) {
+				bt.printGroupTopicOffset(out, grp, topic, partitions)
+				wg.Done()
+			}(grp, top, parts)
+		}
+	}
+	wg.Wait()
+*/
 	bt.client, err = b.Publisher.Connect()
 	if err != nil {
 		return err
@@ -153,19 +199,6 @@ func (bt *Testing) Run(b *beat.Beat) error {
 
 }
 	
-func getGroups() ([]string,error) {
-	group_list,err :=zClient.Consumergroups()
-	if err != nil {
-		logp.Err("Unable to retrieve groups")
-		return nil,err
-	}
-	groups:=make([]string,len(group_list))
-	for i, group := range group_list {
-		groups[i]=group.Name
-	}
-	return groups,nil
-}
-
 type findGroupResult struct {
 	done bool
 	group string
@@ -200,6 +233,7 @@ awaitGroups:
 			groups = append(groups, res.group)
 		}
 	}
+	return groups
 }
 
 func (bt *Testing) fetchTopics() []string {
@@ -207,6 +241,7 @@ func (bt *Testing) fetchTopics() []string {
 	if err != nil {
 		failf("failed to read topics err=%v", err)
 	}
+	fmt.Println(tps[0])
 	return tps
 }
 
@@ -215,6 +250,8 @@ func (bt *Testing) findGroupsOnBroker(broker *sarama.Broker, results chan findGr
 		err  error
 		resp *sarama.ListGroupsResponse
 	)
+
+	//fmt.Println(broker)
 	if err = bt.connect(broker); err != nil {
 		errs <- fmt.Errorf("failed to connect to broker %#v err=%s\n", broker.Addr(), err)
 	}
@@ -222,7 +259,6 @@ func (bt *Testing) findGroupsOnBroker(broker *sarama.Broker, results chan findGr
 	if resp, err = broker.ListGroups(&sarama.ListGroupsRequest{}); err != nil {
 		errs <- fmt.Errorf("failed to list brokers on %#v err=%v", broker.Addr(), err)
 	}
-
 	if resp.Err != sarama.ErrNoError {
 		errs <- fmt.Errorf("failed to list brokers on %#v err=%v", broker.Addr(), resp.Err)
 	}
@@ -231,6 +267,15 @@ func (bt *Testing) findGroupsOnBroker(broker *sarama.Broker, results chan findGr
 		results <- findGroupResult{group: name}
 	}
 	results <- findGroupResult{done: true}
+	
+}
+
+func (bt *Testing) fetchPartitions(top string) []int32 {
+	ps, err := bt.sClient.Partitions(top)
+	if err != nil {
+		failf("failed to read partitions for topic=%s err=%v", top, err)
+	}
+	return ps
 }
 
 func (bt *Testing) connect(broker *sarama.Broker) error {
@@ -261,11 +306,12 @@ func (bt *Testing) saramaConfig() *sarama.Config {
 		cfg = sarama.NewConfig()
 	)
 
-	cfg.Version = bt.version
+	cfg.Version = sarama.V0_10_0_0
+	fmt.Println(cfg.Version)
 	if usr, err = user.Current(); err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to read current user err=%v", err)
 	}
-	cfg.ClientID = "kt-group-" + sanitizeUsername(usr.Username)
+	cfg.ClientID = "All-Groups" + sanitizeUsername(usr.Username)
 
 	return cfg
 }

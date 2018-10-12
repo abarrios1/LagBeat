@@ -5,9 +5,10 @@
 testing:
   # Defines how often an event is sent to the output
   period: 5s
-  group: ""
-  topic: ""
-  zookeepers: [""]
+  #group: 
+  #topic: "metricbeat"
+  brokers: ["10.44.64.130:2181"]
+  zookeepers: ["10.44.64.135:9092", "10.44.64.136:9092", "10.44.64.137:9092"]
 #================================ General =====================================
 
 # The name of the shipper that publishes the network data. It can be used to group
