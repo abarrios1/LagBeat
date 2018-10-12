@@ -98,47 +98,6 @@ func kafkaVersion(s string) sarama.KafkaVersion {
 	return dflt
 }
 
-func print(in <-chan printContext, pretty bool) {
-	var (
-		buf     []byte
-		err     error
-		marshal = json.Marshal
-	)
-
-	if pretty && terminal.IsTerminal(int(syscall.Stdout)) {
-		marshal = func(i interface{}) ([]byte, error) { return json.MarshalIndent(i, "", "  ") }
-	}
-
-	for {
-		ctx := <-in
-		if buf, err = marshal(ctx.output); err != nil {
-			failf("failed to marshal output %#v, err=%v", ctx.output, err)
-		}
-
-		fmt.Println(string(buf))
-		close(ctx.done)
-	}
-}
-
-func failf(msg string, args ...interface{}) {
-	fmt.Fprintf(os.Stderr, msg+"\n", args...)
-	os.Exit(1)
-}
-
-func readStdinLines(max int, out chan string) {
-	scanner := bufio.NewScanner(os.Stdin)
-	scanner.Buffer(make([]byte, max), max)
-
-	for scanner.Scan() {
-		out <- scanner.Text()
-	}
-
-	if err := scanner.Err(); err != nil {
-		fmt.Fprintf(os.Stderr, "scanning input failed err=%v\n", err)
-	}
-	close(out)
-}
-
 func sanitizeUsername(u string) string {
 	// Windows user may have format "DOMAIN|MACHINE\username", remove domain/machine if present
 	s := strings.Split(u, "\\")

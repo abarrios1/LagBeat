@@ -3,8 +3,8 @@ package beater
 import (
 	//"crypto/tls"
 	"fmt"
-	//"sort"
-	//"sync"
+	"sort"
+	"sync"
 	"time"
 	"os"
 	"os/user"
@@ -150,13 +150,12 @@ func (bt *Testing) Run(b *beat.Beat) error {
 		fmt.Println(len(parts))
 		if len(parts) == 0 {
 			parts = bt.fetchPartitions(topic)
-			fmt.Println(parts)
 			fmt.Fprintf(os.Stderr, "found partitions=%v for topic=%v\n", parts, topic)
 		}
 		topicPartitions[topic] = parts
 	}
 
-/*	wg := &sync.WaitGroup{}
+	wg := &sync.WaitGroup{}
 	wg.Add(len(groups) * len(topics))
 	for _, grp := range groups {
 		for top, parts := range topicPartitions {
@@ -167,7 +166,7 @@ func (bt *Testing) Run(b *beat.Beat) error {
 		}
 	}
 	wg.Wait()
-*/
+
 	bt.client, err = b.Publisher.Connect()
 	if err != nil {
 		return err
@@ -197,6 +196,96 @@ func (bt *Testing) Run(b *beat.Beat) error {
 		counter++
 	}
 
+}
+
+func (bt *Testing) printGroupTopicOffset(out chan printContext, grp, top string, parts []int32) {
+	target := group{Name: grp, Topic: top, Offsets: []groupOffset{}}
+	results := make(chan groupOffset)
+	done := make(chan struct{})
+
+	wg := &sync.WaitGroup{}
+	wg.Add(len(parts))
+	for _, part := range parts {
+		go bt.fetchGroupOffset(wg, grp, top, part, results)
+	}
+	go func() { wg.Wait(); close(done) }()
+
+awaitGroupOffsets:
+	for {
+		select {
+		case res := <-results:
+			target.Offsets = append(target.Offsets, res)
+		case <-done:
+			break awaitGroupOffsets
+		}
+	}
+
+	if len(target.Offsets) > 0 {
+		sort.Slice(target.Offsets, func(i, j int) bool {
+			return target.Offsets[j].Partition > target.Offsets[i].Partition
+		})
+		ctx := printContext{output: target, done: make(chan struct{})}
+		out <- ctx
+		<-ctx.done
+	}
+}
+
+func (bt *Testing) resolveOffset(top string, part int32, off int64) int64 {
+	resolvedOff, err := bt.sClient.GetOffset(top, part, off)
+	if err != nil {
+		failf("failed to get offset to reset to for partition=%d err=%v", part, err)
+	}
+
+	if bt.verbose {
+		fmt.Fprintf(os.Stderr, "resolved offset %v for topic=%s partition=%d to %v\n", off, top, part, resolvedOff)
+	}
+
+	return resolvedOff
+}
+
+func (bt *Testing) fetchGroupOffset(wg *sync.WaitGroup, grp, top string, part int32, results chan groupOffset) {
+	var (
+		err           error
+		offsetManager sarama.OffsetManager
+		shouldReset   = bt.reset >= 0 || bt.reset == sarama.OffsetNewest || bt.reset == sarama.OffsetOldest
+	)
+
+	if bt.verbose {
+		fmt.Fprintf(os.Stderr, "fetching offset information for group=%v topic=%v partition=%v\n", grp, top, part)
+	}
+
+	defer wg.Done()
+
+	if offsetManager, err = sarama.NewOffsetManagerFromClient(grp, bt.sClient); err != nil {
+		failf("failed to create client err=%v", err)
+	}
+	defer logClose("offset manager", offsetManager)
+
+	pom, err := offsetManager.ManagePartition(top, part)
+	if err != nil {
+		failf("failed to manage partition group=%s topic=%s partition=%d err=%v", grp, top, part, err)
+	}
+	defer logClose("partition offset manager", pom)
+
+	groupOff, _ := pom.NextOffset()
+	if shouldReset {
+		resolvedOff := bt.reset
+		if resolvedOff == sarama.OffsetNewest || resolvedOff == sarama.OffsetOldest {
+			resolvedOff = bt.resolveOffset(top, part, bt.reset)
+		}
+		groupOff = resolvedOff
+		pom.MarkOffset(resolvedOff, "")
+	}
+
+	// we haven't reset it, and it wasn't set before - lag depends on client's config
+	if groupOff == sarama.OffsetNewest || groupOff == sarama.OffsetOldest {
+		results <- groupOffset{Partition: part}
+		return
+	}
+
+	partOff := bt.resolveOffset(top, part, sarama.OffsetNewest)
+	lag := partOff - groupOff
+	results <- groupOffset{Partition: part, Offset: &groupOff, Lag: &lag}
 }
 	
 type findGroupResult struct {
