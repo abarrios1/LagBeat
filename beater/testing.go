@@ -12,7 +12,7 @@ import (
 	"github.com/elastic/beats/libbeat/beat"
 	"github.com/elastic/beats/libbeat/common"
 	"github.com/elastic/beats/libbeat/logp"
-	"github.com/abarrios1/Kafkabeat/config"
+	"github.com/abarrios1/testing/config"
 	"github.com/wvanbergen/kazoo-go"
 	"github.com/Shopify/sarama"
 )
@@ -72,7 +72,7 @@ func  New(b *beat.Beat, cfg *common.Config) (beat.Beater, error)  {
 	return bt, nil
 }
 
-func (bt *Kafkabeat) Config(b *beat.Beat) error {
+func (bt *Kafkabeat) Config(b *beat.Beat) {
 	logp.Info("Configuring Kafkabeat...")
 
 	// Initialize variable err
@@ -103,6 +103,8 @@ func (bt *Kafkabeat) Config(b *beat.Beat) error {
 		fmt.Println("Unable to identify active brokers")
 	}
 	logp.Info("Brokers: %v",bt.brokers)
+
+	//This part of the program causes Run not to loop and publish
 
 	out := make(chan printContext)
 	go print(out, bt.pretty)
@@ -140,7 +142,7 @@ func (bt *Kafkabeat) Config(b *beat.Beat) error {
 
 	wg.Wait()
 
-	return err
+	
 }
 
 // Run starts Kafkabeat.
@@ -148,15 +150,21 @@ func (bt *Kafkabeat) Run(b *beat.Beat) error {
 	logp.Info("Kafkabeat is running! Hit CTRL-C to stop it.")
 	//Initialize error variable
 	var err error
-
-	// Get Consumer Groups
-	groups := bt.getConsumerGroups()
+	
+	// Pass beats to the config
+	bt.Config(b)
 
 	// Get Topics
 	topics := bt.getTopics()
+	
+	// Get Consumer Groups
+	groups := bt.getConsumerGroups()
 
-	//Get Topic Partitions
-	topicPartitions := bt.getTopicPartitions(topics)
+	//fmt.Println(group{})
+
+	//Get partitions
+	//partitions := bt.getTopicPartitions(topics)
+
 
 	// Connect to beats client to publish events
 	bt.client, err = b.Publisher.Connect()
@@ -179,9 +187,9 @@ func (bt *Kafkabeat) Run(b *beat.Beat) error {
 			Fields: common.MapStr{
 				"type":    b.Info.Name,
 				"counter": counter,
-				"#groups":   len(groups),
-				"#topics":   len(topics),
-				"#topicPartitions": len(topicPartitions),
+				"groups":   len(groups),
+				"topics":   len(topics),
+				"groupOffset": group{},
 
 			},
 		}
@@ -190,6 +198,7 @@ func (bt *Kafkabeat) Run(b *beat.Beat) error {
 		counter++
 	}
 }
+
 func (bt *Kafkabeat) getConsumerGroups() []string {
 	//List all brokers...
 	brokers := sClient.Brokers()
@@ -224,23 +233,24 @@ func (bt *Kafkabeat) getTopics() []string {
 	// Print the length of the topics
 	fmt.Fprintf(os.Stderr, "found %v topics\n", len(topics))
 
-	return nil
+	return topics
 }
 
-func (bt *Kafkabeat) getTopicPartitions(topics []string) []string {
+func (bt *Kafkabeat) getTopicPartitions(topics []string) map[string][]int32 {
 
 	topicPartitions := map[string][]int32{}
 	parts := bt.partitions
 	for _, topic := range topics {
-		fmt.Println(len(parts))
+		//fmt.Println(len(parts))
 		if len(parts) == 0 {
 			parts = bt.fetchPartitions(topic)
 			//fmt.Fprintf(os.Stderr, "found partitions=%v for topic=%v\n", parts, topic)
 		}
-		topicPartitions[topic] = parts
+		topicPartitions[topic] = append(parts)
 	}
+	//fmt.Println(topicPartitions)
 
-	return nil
+	return topicPartitions
 }
 
 
