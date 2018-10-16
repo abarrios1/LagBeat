@@ -1,7 +1,7 @@
 package beater
 
 import (
-	//"crypto/tls"
+	"strconv"
 	"fmt"
 	"sort"
 	"sync"
@@ -19,6 +19,7 @@ import (
 var (
 	sClient sarama.Client
 	zClient *kazoo.Kazoo
+	out = make(chan printContext)
 )
 
 // Testing configuration.
@@ -26,8 +27,10 @@ type Kafkabeat struct {
 	config config.Config
 	done   chan struct{}
 	period time.Duration
+	groups []string
 	group  string
 	topic  string
+	topics []string
 	brokers []string
 	zookeepers []string
 	partitions   []int32
@@ -72,7 +75,7 @@ func  New(b *beat.Beat, cfg *common.Config) (beat.Beater, error)  {
 	return bt, nil
 }
 
-func (bt *Kafkabeat) Config(b *beat.Beat) {
+func (bt *Kafkabeat) Config(b *beat.Beat) error {
 	logp.Info("Configuring Kafkabeat...")
 
 	// Initialize variable err
@@ -106,7 +109,7 @@ func (bt *Kafkabeat) Config(b *beat.Beat) {
 
 	//This part of the program causes Run not to loop and publish
 
-	out := make(chan printContext)
+
 	go print(out, bt.pretty)
 
 	// Get Consumer Groups
@@ -140,31 +143,41 @@ func (bt *Kafkabeat) Config(b *beat.Beat) {
 		}
 	}
 
-	wg.Wait()
+	//req := sarama.OffsetFetchRequest{ConsumerGroup:"", Version:0}
 
-	
+
+	return err
 }
 
 // Run starts Kafkabeat.
 func (bt *Kafkabeat) Run(b *beat.Beat) error {
 	logp.Info("Kafkabeat is running! Hit CTRL-C to stop it.")
 	//Initialize error variable
+	//var err error
 	var err error
-	
 	// Pass beats to the config
 	bt.Config(b)
 
 	// Get Topics
-	topics := bt.getTopics()
+	bt.topics = bt.getTopics()
 	
 	// Get Consumer Groups
-	groups := bt.getConsumerGroups()
+	bt.groups = bt.getConsumerGroups()
 
-	//fmt.Println(group{})
+	/*fmt.Println(group{})
+	ctx := <-out
+	for {
+		if buf, err = marshal(ctx.output); err != nil {
+			fmt.Errorf("Failed to marshal")
+		}
+		fmt.Println(string(buf))
+		close(ctx.done)
+	}
 
+	fmt.Println ("\nPrinting buf\n")
+	fmt.Println(string(buf))*/
 	//Get partitions
 	//partitions := bt.getTopicPartitions(topics)
-
 
 	// Connect to beats client to publish events
 	bt.client, err = b.Publisher.Connect()
@@ -174,7 +187,7 @@ func (bt *Kafkabeat) Run(b *beat.Beat) error {
 
 	// Initialize ticker with time set in config file
 	ticker := time.NewTicker(bt.config.Period)
-	counter := 1
+	//counter := 1
 	for {
 		select {
 		case <-bt.done:
@@ -182,21 +195,104 @@ func (bt *Kafkabeat) Run(b *beat.Beat) error {
 		case <-ticker.C:
 		}
 
-		event := beat.Event{
-			Timestamp: time.Now(),
-			Fields: common.MapStr{
-				"type":    b.Info.Name,
-				"counter": counter,
-				"groups":   len(groups),
-				"topics":   len(topics),
-				"groupOffset": group{},
+			for _, topic := range bt.topics {
+				pids, err := bt.processTopic(topic)
 
-			},
+				if err == nil {
+					events:=processGroups(bt.groups, topic, pids)
+
+					bt.client.PublishAll(events)
+				}
+			}
 		}
-		bt.client.Publish(event)
-		logp.Info("Event sent")
-		counter++
 	}
+
+func (bt *Kafkabeat) processTopic(topic string) (map[int32]int64,error){
+	pids, err := sClient.Partitions(topic)
+	if err != nil {
+		logp.Err("Unable to retrieve paritions for topic %v",topic)
+		return nil,err
+	}
+	logp.Info("Partitions retrieved for topic %v",topic)
+	return getPartitionSizes(topic, pids), nil
+}
+
+func getPartitionSizes(topic string, pids []int32) (map[int32]int64){
+	pId_sizes := make(map[int32]int64)
+	for _, pid := range pids {
+		logp.Debug("kafkabeat","Processing partition %v", pid)
+		pid_size,err:=sClient.GetOffset(topic, pid,sarama.OffsetNewest)
+		if err != nil {
+			logp.Err("Unable to identify size for partition %s and topic %s", pid,topic)
+		} else {
+			logp.Debug("kafkabeat","Current log size is %v for partition %v", strconv.FormatInt(pid_size,10), pid)
+			pId_sizes[pid]=pid_size
+		}
+
+	}
+	return pId_sizes
+}
+
+func processGroups(groups []string, topic string,pids map[int32]int64) ([]beat.Event){
+	var events []beat.Event
+	for _,group := range groups {
+		pid_offsets,err := getConsumerOffsets(group, topic, pids)
+		if err == nil {
+			for pid,offset := range pid_offsets {
+
+				size,ok := pids[pid]
+
+				if ok {
+					fmt.Println("Okay is all good")
+				}
+
+				event:=beat.Event{
+					Timestamp: time.Now(),
+					Fields: common.MapStr {
+						"type": "consumer",
+						"partition": pid,
+						"topic":topic,
+						"group": group,
+						"offset": size-offset,
+					},
+				}
+
+				events=append(events,event)
+			}
+		} else {
+			logp.Debug("kafkabeat","No offsets for group %s on topic %s", group, topic)
+		}
+	}
+	return events
+}
+
+func getConsumerOffsets(group string, topic string, pids map[int32]int64) (map[int32]int64,error) {
+	broker,err := sClient.Coordinator(group)
+	offsets := make(map[int32]int64)
+	if err != nil {
+		logp.Err("Unable to identify group coordinator for group %v",group)
+	} else {
+		request:=sarama.OffsetFetchRequest{ConsumerGroup:group,Version:0}
+		for pid, size := range pids {
+			if size > 0 {
+				request.AddPartition(topic, pid)
+			}
+		}
+		res,err := broker.FetchOffset(&request)
+		if err != nil {
+			logp.Err("Issue fetching offsets coordinator for topic %v",topic)
+			logp.Err("%v",err)
+		}
+		if res != nil {
+			for pid,_  := range pids {
+				offset := res.GetBlock(topic, pid)
+				if offset != nil && offset.Offset > -1{
+					offsets[pid]=offset.Offset
+				}
+			}
+		}
+	}
+	return offsets,err
 }
 
 func (bt *Kafkabeat) getConsumerGroups() []string {
@@ -239,14 +335,13 @@ func (bt *Kafkabeat) getTopics() []string {
 func (bt *Kafkabeat) getTopicPartitions(topics []string) map[string][]int32 {
 
 	topicPartitions := map[string][]int32{}
-	parts := bt.partitions
 	for _, topic := range topics {
-		//fmt.Println(len(parts))
+		parts := bt.partitions
 		if len(parts) == 0 {
 			parts = bt.fetchPartitions(topic)
-			//fmt.Fprintf(os.Stderr, "found partitions=%v for topic=%v\n", parts, topic)
+			fmt.Fprintf(os.Stderr, "found partitions=%v for topic=%v\n", parts, topic)
 		}
-		topicPartitions[topic] = append(parts)
+		topicPartitions[topic] = parts
 	}
 	//fmt.Println(topicPartitions)
 
@@ -289,7 +384,7 @@ awaitGroupOffsets:
 func (bt *Kafkabeat) resolveOffset(top string, part int32, off int64) int64 {
 	resolvedOff, err := sClient.GetOffset(top, part, off)
 	if err != nil {
-		failf("failed to get offset to reset to for partition=%d err=%v", part, err)
+		fmt.Println("failed to get offset to reset to for partition=%d on topic=%v err=%v", part, top,err)
 	}
 
 	if bt.verbose {
@@ -299,7 +394,7 @@ func (bt *Kafkabeat) resolveOffset(top string, part int32, off int64) int64 {
 	return resolvedOff
 }
 
-func (bt *Kafkabeat) fetchGroupOffset(wg *sync.WaitGroup, grp, top string, part int32, results chan groupOffset) {
+func (bt *Kafkabeat) fetchGroupOffset(wg *sync.WaitGroup, grp, top string, part int32, results chan groupOffset) chan groupOffset {
 	var (
 		err           error
 		offsetManager sarama.OffsetManager
@@ -336,12 +431,13 @@ func (bt *Kafkabeat) fetchGroupOffset(wg *sync.WaitGroup, grp, top string, part 
 	// we haven't reset it, and it wasn't set before - lag depends on client's config
 	if groupOff == sarama.OffsetNewest || groupOff == sarama.OffsetOldest {
 		results <- groupOffset{Partition: part}
-		return
+		//return
 	}
 
 	partOff := bt.resolveOffset(top, part, sarama.OffsetNewest)
 	lag := partOff - groupOff
 	results <- groupOffset{Partition: part, Offset: &groupOff, Lag: &lag}
+	return results
 }
 
 func (bt *Kafkabeat) findGroups(brokers []*sarama.Broker) []string {
@@ -370,6 +466,7 @@ awaitGroups:
 				doneCount++
 				continue awaitGroups
 			}
+
 			groups = append(groups, res.group)
 		}
 	}
