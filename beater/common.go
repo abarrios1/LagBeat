@@ -44,7 +44,6 @@ func print(in <-chan printContext, pretty bool) {
 		if buf, err = marshal(ctx.output); err != nil {
 			failf("failed to marshal output %#v, err=%v", ctx.output, err)
 		}
-
 		fmt.Println(string(buf))
 		close(ctx.done)
 	}

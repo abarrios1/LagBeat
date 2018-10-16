@@ -143,8 +143,20 @@ func (bt *Kafkabeat) Config(b *beat.Beat) error {
 		}
 	}
 
-	//req := sarama.OffsetFetchRequest{ConsumerGroup:"", Version:0}
+	for _, topic := range topics {
+		pids, err := bt.processTopic(topic)
 
+		fmt.Println(pids)
+		events := bt.processGroups(groups, topic, pids)
+
+		if err != nil {
+			fmt.Errorf("Error with processing topic: %v", err)
+			os.Exit(1)
+		}
+		fmt.Println(events)
+
+
+	}
 
 	return err
 }
@@ -194,18 +206,23 @@ func (bt *Kafkabeat) Run(b *beat.Beat) error {
 			return nil
 		case <-ticker.C:
 		}
-
-			for _, topic := range bt.topics {
+		
+		for _, topic := range bt.topics {
 				pids, err := bt.processTopic(topic)
 
-				if err == nil {
-					events:=processGroups(bt.groups, topic, pids)
-
-					bt.client.PublishAll(events)
+				if err != nil {
+					fmt.Errorf("Error with processing topic: %v", err)
+					os.Exit(1)
 				}
+
+				events := bt.processGroups(bt.groups, topic, pids)
+				fmt.Println("Publishing events!")
+				fmt.Println(events)
+				bt.client.PublishAll(events)
+
 			}
-		}
 	}
+}
 
 func (bt *Kafkabeat) processTopic(topic string) (map[int32]int64,error){
 	pids, err := sClient.Partitions(topic)
@@ -233,10 +250,11 @@ func getPartitionSizes(topic string, pids []int32) (map[int32]int64){
 	return pId_sizes
 }
 
-func processGroups(groups []string, topic string,pids map[int32]int64) ([]beat.Event){
+func (bt *Kafkabeat) processGroups(groups []string, topic string,pids map[int32]int64) ([]beat.Event){
 	var events []beat.Event
 	for _,group := range groups {
 		pid_offsets,err := getConsumerOffsets(group, topic, pids)
+
 		if err == nil {
 			for pid,offset := range pid_offsets {
 
@@ -245,7 +263,14 @@ func processGroups(groups []string, topic string,pids map[int32]int64) ([]beat.E
 				if ok {
 					fmt.Println("Okay is all good")
 				}
-
+				fmt.Println("\nThis is the pid in process groups.")
+				fmt.Println(pid)
+				fmt.Println("\nThis is the topic in process groups")
+				fmt.Println(topic)
+				fmt.Println("\nThis is the group in process groups")
+				fmt.Println(group)
+				fmt.Println("\nThis is the lag in process groups")
+				fmt.Println(size-offset)
 				event:=beat.Event{
 					Timestamp: time.Now(),
 					Fields: common.MapStr {
@@ -256,6 +281,8 @@ func processGroups(groups []string, topic string,pids map[int32]int64) ([]beat.E
 						"offset": size-offset,
 					},
 				}
+				fmt.Println("Publishing Events!")
+				fmt.Println(event)
 
 				events=append(events,event)
 			}
@@ -267,30 +294,50 @@ func processGroups(groups []string, topic string,pids map[int32]int64) ([]beat.E
 }
 
 func getConsumerOffsets(group string, topic string, pids map[int32]int64) (map[int32]int64,error) {
+	fmt.Println("Checking pids")
+	fmt.Println(pids)
 	broker,err := sClient.Coordinator(group)
 	offsets := make(map[int32]int64)
 	if err != nil {
 		logp.Err("Unable to identify group coordinator for group %v",group)
 	} else {
-		request:=sarama.OffsetFetchRequest{ConsumerGroup:group,Version:0}
+		request:=sarama.OffsetFetchRequest{ConsumerGroup:group,Version:1}
 		for pid, size := range pids {
 			if size > 0 {
 				request.AddPartition(topic, pid)
+
 			}
 		}
+		fmt.Println("\nFetch request of offset")
+		fmt.Println(request)
 		res,err := broker.FetchOffset(&request)
+		fmt.Println("\nGetting request result")
+		fmt.Println(res)
 		if err != nil {
 			logp.Err("Issue fetching offsets coordinator for topic %v",topic)
 			logp.Err("%v",err)
 		}
+		var offset *sarama.OffsetFetchResponseBlock
 		if res != nil {
-			for pid,_  := range pids {
-				offset := res.GetBlock(topic, pid)
+			for pid := range pids {
+				fmt.Println("\nChecking pid")
+				fmt.Println(pid)
+				fmt.Println("\nChecking topic")
+				fmt.Println(topic)
+				offs := res.Blocks
+				fmt.Println(offs["metricbeat"][0])
+				offset = res.GetBlock(topic,pid)
+				fmt.Println("\nChecking offset:")
+				fmt.Println(offset)
 				if offset != nil && offset.Offset > -1{
 					offsets[pid]=offset.Offset
 				}
 			}
 		}
+		fmt.Println("\nChecking offsets:")
+		fmt.Println(offsets)
+		fmt.Println("\nChecking errors:")
+		fmt.Println(err)
 	}
 	return offsets,err
 }
