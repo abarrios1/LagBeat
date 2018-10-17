@@ -30,12 +30,6 @@ type Kafkabeat struct {
 	client beat.Client
 }
 
-type groupOffset struct {
-	Partition int32  `json:"partition"`
-	Offset    *int64 `json:"offset"`
-	Lag       *int64 `json:"lag"`
-}
-
 type findGroupResult struct {
 	done bool
 	group string
@@ -106,21 +100,6 @@ func (bt *Kafkabeat) Run(b *beat.Beat) error {
 	var err error
 	// Pass beats to the config
 	bt.Config(b)
-
-	/*fmt.Println(group{})
-	ctx := <-out
-	for {
-		if buf, err = marshal(ctx.output); err != nil {
-			fmt.Errorf("Failed to marshal")
-		}
-		fmt.Println(string(buf))
-		close(ctx.done)
-	}
-
-	fmt.Println ("\nPrinting buf\n")
-	fmt.Println(string(buf))*/
-	//Get partitions
-	//partitions := bt.getTopicPartitions(topics)
 
 	// Connect to beats client to publish events
 	bt.client, err = b.Publisher.Connect()
