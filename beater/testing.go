@@ -23,24 +23,11 @@ type Kafkabeat struct {
 	done   chan struct{}
 	period time.Duration
 	groups []string
-	group  string
-	topic  string
 	topics []string
 	brokers []string
 	zookeepers []string
-	partitions   []int32
-	reset        int64
-	verbose      bool
-	pretty       bool
 	version sarama.KafkaVersion
-	offsets      bool
 	client beat.Client
-}
-
-type group struct {
-	Name    string        `json:"name"`
-	Topic   string        `json:"topic,omitempty"`
-	Offsets []groupOffset `json:"offsets,omitempty"`
 }
 
 type groupOffset struct {
@@ -263,12 +250,9 @@ func (bt *Kafkabeat) getConsumerGroups() []string {
 	// Initialize groups
 	groups := []string{}
 
-	// If group struct is empty then get all groups
-	if bt.group == "" {
 		// Find Groups must be passing a *sarama.Broker through, not string
-		for _, g := range bt.findGroups(brokers) {
-			groups = append(groups, g)
-		}
+	for _, g := range bt.findGroups(brokers) {
+		groups = append(groups, g)
 	}
 	// Print the length of the groups
 	fmt.Fprintf(os.Stderr, "found %v groups\n", len(groups))
@@ -280,12 +264,9 @@ func (bt *Kafkabeat) getTopics() []string {
 	//Initalize topics
 	topics := []string{}
 
-	// If topic struct is empty then get all topics
-	if bt.topic == "" {
-		// Calls function fetchTopics() for all topics
-		for _, t := range bt.fetchTopics() {
-			topics = append(topics, t)
-		}
+	// Calls function fetchTopics() for all topics
+	for _, t := range bt.fetchTopics() {
+		topics = append(topics, t)
 	}
 	// Print the length of the topics
 	fmt.Fprintf(os.Stderr, "found %v topics\n", len(topics))
